@@ -1,6 +1,7 @@
 import { defineBackend, defineFunction } from '@aws-amplify/backend';
 import { auth } from './auth/resource';
 import { data } from './data/resource';
+import { FunctionUrlAuthType } from 'aws-cdk-lib/aws-lambda';
 
 const extractGraphFn = defineFunction({
   name: 'extract-graph',
@@ -16,8 +17,25 @@ const extractGraphFn = defineFunction({
 /**
  * @see https://docs.amplify.aws/react/build-a-backend/ to add storage, functions, and more
  */
-defineBackend({
+const backend = defineBackend({
   auth,
   data,
   extractGraphFn,
+});
+
+const extractGraphFnLambda = backend.extractGraphFn.resources.lambda;
+
+const extractGraphUrl = extractGraphFnLambda.addFunctionUrl({
+  authType: FunctionUrlAuthType.NONE,
+  cors: {
+    allowedOrigins: ['*'],
+    allowedHeaders: ['Content-Type'],
+  },
+});
+
+// 배포 후 URL을 알 수 있도록 출력에 추가
+backend.addOutput({
+  custom: {
+    extractGraphUrl: extractGraphUrl.url,
+  },
 });

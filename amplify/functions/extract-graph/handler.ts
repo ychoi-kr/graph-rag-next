@@ -1,4 +1,3 @@
-// amplify/functions/extract-graph/handler.ts
 import {
   BedrockRuntimeClient,
   InvokeModelCommand,
@@ -13,6 +12,7 @@ const client = new BedrockRuntimeClient({ region });
 
 interface ExtractGraphEvent {
   text?: string;
+  body?: string | { text?: string };
 }
 const PROMPT = `
 You are an information extraction model for literary text.
@@ -262,10 +262,45 @@ REMEMBER:
 and NOTHING else.
 `;
 
-export const handler = async (event: ExtractGraphEvent) => {
+function extractTextFromEvent(event: any): string | undefined {
+  // Lambda Function URL / API Gateway style
+  if (event?.body) {
+    let bodyStr = event.body;
+
+    // Handle Base64 encoding (common in Function URLs)
+    if (event.isBase64Encoded && typeof bodyStr === 'string') {
+      try {
+        bodyStr = Buffer.from(bodyStr, 'base64').toString('utf-8');
+      } catch {
+        // Ignore decode errors, attempt to parse as is
+      }
+    }
+
+    // Parse JSON body
+    if (typeof bodyStr === 'string') {
+      try {
+        const parsed = JSON.parse(bodyStr);
+        return parsed?.text;
+      } catch {
+        return undefined;
+      }
+    }
+
+    // Fallback if body is already an object (e.g. some test events)
+    return bodyStr?.text;
+  }
+
+  return undefined;
+}
+
+export const handler = async (event: any) => {
+  console.log('### incoming event keys:', Object.keys(event || {}));
+  console.log('### incoming event raw:', JSON.stringify(event).slice(0, 1000));
+
   try {
-    const text = event.text;
-    if (!text) {
+    const text = extractTextFromEvent(event);
+
+    if (!text || !text.trim()) {
       return { ok: false, message: 'text is required' };
     }
 

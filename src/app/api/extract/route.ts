@@ -1,44 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server';
-import {
-  LambdaClient,
-  InvokeCommand,
-} from '@aws-sdk/client-lambda';
-
-const client = new LambdaClient({
-  region: 'ap-northeast-2',
-  // ✅ 로컬에서는 Cognito 로그인 세션이 아니라
-  // AWS CLI 자격증명(~/.aws/credentials)을 그대로 씀
-  credentials: undefined,
-});
-
-// ⚠️ Lambda 실제 이름 (콘솔에서 확인한 정확한 이름)
-const FUNCTION_NAME =
-  'amplify-graphragnext-yong-extractgraphlambda885A32-qTtsXCLSlmmr';
+import outputs from '@/../amplify_outputs.json';
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const { text } = body;
+    const { text } = await req.json();
 
-    if (!text) {
+    if (!text || !text.trim()) {
       return NextResponse.json(
         { ok: false, message: 'text is required' },
         { status: 400 }
       );
     }
 
-    const command = new InvokeCommand({
-      FunctionName: FUNCTION_NAME,
-      Payload: Buffer.from(JSON.stringify({ text })),
+    const url = outputs.custom?.extractGraphUrl;
+    if (!url) {
+      return NextResponse.json(
+        { ok: false, message: 'EXTRACT_URL is not found in amplify_outputs.json' },
+        { status: 500 }
+      );
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text }),
     });
 
-    const response = await client.send(command);
+    const payload = await response.json();
 
-    const payload = response.Payload
-      ? JSON.parse(Buffer.from(response.Payload).toString())
-      : null;
-
-    return NextResponse.json(payload);
+    return NextResponse.json(payload, { status: response.status });
   } catch (err) {
     console.error('API extract error:', err);
     return NextResponse.json(
