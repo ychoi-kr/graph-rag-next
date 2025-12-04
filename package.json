@@ -11,6 +11,9 @@
   "dependencies": {
     "@aws-amplify/ui-react": "^6.13.1",
     "@aws-sdk/client-bedrock-runtime": "^3.943.0",
+    "@aws-sdk/client-dynamodb": "^3.943.0",
+    "@aws-sdk/client-lambda": "^3.943.0",
+    "@aws-sdk/lib-dynamodb": "^3.943.0",
     "aws-amplify": "^6.15.8",
     "next": "16.0.6",
     "react": "19.2.0",

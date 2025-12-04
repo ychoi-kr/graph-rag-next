@@ -2,6 +2,8 @@ import {
   BedrockRuntimeClient,
   InvokeModelCommand,
 } from '@aws-sdk/client-bedrock-runtime';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 
 const region = process.env.BEDROCK_REGION ?? 'ap-northeast-2';
 const modelId =
@@ -9,11 +11,14 @@ const modelId =
   'anthropic.claude-3-haiku-20240307-v1:0';
 
 const client = new BedrockRuntimeClient({ region });
+const ddbClient = new DynamoDBClient({ region });
+const docClient = DynamoDBDocumentClient.from(ddbClient);
 
 interface ExtractGraphEvent {
+  jobId?: string;
   text?: string;
-  body?: string | { text?: string };
 }
+
 const PROMPT = `
 You are an information extraction model for literary text.
 
@@ -262,97 +267,90 @@ REMEMBER:
 and NOTHING else.
 `;
 
-function extractTextFromEvent(event: any): string | undefined {
-  // Lambda Function URL / API Gateway style
-  if (event?.body) {
-    let bodyStr = event.body;
+async function extractGraph(text: string) {
+  const userPrompt = `${PROMPT}\n\nLiterary text:\n${text}`;
 
-    // Handle Base64 encoding (common in Function URLs)
-    if (event.isBase64Encoded && typeof bodyStr === 'string') {
-      try {
-        bodyStr = Buffer.from(bodyStr, 'base64').toString('utf-8');
-      } catch {
-        // Ignore decode errors, attempt to parse as is
-      }
-    }
+  const body = {
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 8192,
+    temperature: 0.2,
+    messages: [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: userPrompt }],
+      },
+    ],
+  };
 
-    // Parse JSON body
-    if (typeof bodyStr === 'string') {
-      try {
-        const parsed = JSON.parse(bodyStr);
-        return parsed?.text;
-      } catch {
-        return undefined;
-      }
-    }
+  const command = new InvokeModelCommand({
+    modelId,
+    contentType: 'application/json',
+    accept: 'application/json',
+    body: new TextEncoder().encode(JSON.stringify(body)),
+  });
 
-    // Fallback if body is already an object (e.g. some test events)
-    return bodyStr?.text;
+  const response = await client.send(command);
+  const raw = new TextDecoder().decode(response.body);
+  const data = JSON.parse(raw);
+  const answerText: string = data.content?.[0]?.text ?? '';
+
+  let graph: any;
+  try {
+    const start = answerText.indexOf('{');
+    const end = answerText.lastIndexOf('}');
+    const jsonStr = answerText.slice(start, end + 1);
+    graph = JSON.parse(jsonStr);
+  } catch (parseError) {
+    console.error('Failed to parse graph JSON from model response:', parseError);
+    graph = { nodes: [], edges: [], spans: [] };
   }
 
-  return undefined;
+  return {
+    ok: true,
+    raw: answerText,
+    graph,
+  };
 }
 
 export const handler = async (event: any) => {
-  console.log('### incoming event keys:', Object.keys(event || {}));
-  console.log('### incoming event raw:', JSON.stringify(event).slice(0, 1000));
+  console.log('### incoming event:', JSON.stringify(event).slice(0, 1000));
+
+  // 1. 비동기 호출이므로 jobId와 text가 event에 직접 들어옴 (API Route에서 전달)
+  const { jobId, text } = event;
+
+  if (!jobId || !text) {
+    console.error('Missing jobId or text');
+    return;
+  }
 
   try {
-    const text = extractTextFromEvent(event);
+    const graphData = await extractGraph(text);
 
-    if (!text || !text.trim()) {
-      return { ok: false, message: 'text is required' };
-    }
+    // 2. 성공 시 DB 업데이트
+    await docClient.send(new UpdateCommand({
+      TableName: process.env.AMPLIFY_DATA_EXTRACTIONJOB_TABLE_NAME,
+      Key: { id: jobId },
+      UpdateExpression: 'set #status = :status, #result = :result',
+      ExpressionAttributeNames: { '#status': 'status', '#result': 'result' },
+      ExpressionAttributeValues: {
+        ':status': 'COMPLETED',
+        ':result': graphData,
+      },
+    }));
 
-    const userPrompt = `${PROMPT}\n\nLiterary text:\n${text}`;
+  } catch (error) {
+    console.error('Error extracting graph:', error);
 
-    const body = {
-      anthropic_version: 'bedrock-2023-05-31',
-      max_tokens: 8192,
-      temperature: 0.2,
-      messages: [
-        {
-          role: 'user',
-          content: [{ type: 'text', text: userPrompt }],
-        },
-      ],
-    };
-
-    const command = new InvokeModelCommand({
-      modelId,
-      contentType: 'application/json',
-      accept: 'application/json',
-      body: new TextEncoder().encode(JSON.stringify(body)),
-    });
-
-    const response = await client.send(command);
-    const raw = new TextDecoder().decode(response.body);
-    const data = JSON.parse(raw);
-    const answerText: string = data.content?.[0]?.text ?? '';
-
-    // 여기부터는 기존 파싱 로직 그대로 (raw/graph 채우는 부분)
-    let graph: any;
-    try {
-      const start = answerText.indexOf('{');
-      const end = answerText.lastIndexOf('}');
-      const jsonStr = answerText.slice(start, end + 1);
-      graph = JSON.parse(jsonStr);
-    } catch {
-      graph = { nodes: [], edges: [], spans: [] };
-    }
-
-    return {
-      ok: true,
-      raw: answerText,
-      graph,
-    };
-  } catch (err) {
-    console.error('extract-graph error', err);
-    return {
-      ok: false,
-      message: 'internal error',
-      error: String(err),
-    };
+    // 3. 실패 시 DB 업데이트
+    await docClient.send(new UpdateCommand({
+      TableName: process.env.AMPLIFY_DATA_EXTRACTIONJOB_TABLE_NAME,
+      Key: { id: jobId },
+      UpdateExpression: 'set #status = :status, #errorMessage = :error',
+      ExpressionAttributeNames: { '#status': 'status', '#errorMessage': 'errorMessage' },
+      ExpressionAttributeValues: {
+        ':status': 'FAILED',
+        ':error': String(error),
+      },
+    }));
   }
 };
-
