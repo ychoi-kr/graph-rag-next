@@ -28,7 +28,25 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({ text }),
     });
 
-    const payload = await response.json();
+    const bodyText = await response.text();
+    console.log('[API] Lambda Response Status:', response.status);
+    console.log('[API] Lambda Response Body:', bodyText.substring(0, 200));
+
+    let payload;
+    try {
+      payload = JSON.parse(bodyText);
+    } catch (e) {
+      console.error('[API] Failed to parse JSON:', e);
+      return NextResponse.json(
+        {
+          ok: false,
+          message: 'Invalid response from Lambda',
+          status: response.status,
+          rawBody: bodyText.substring(0, 500)
+        },
+        { status: 502 } // Bad Gateway
+      );
+    }
 
     return NextResponse.json(payload, { status: response.status });
   } catch (err) {
