@@ -4,20 +4,17 @@ import {
 } from '@aws-sdk/client-bedrock-runtime';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBStreamEvent } from 'aws-lambda';
+import { unmarshall } from '@aws-sdk/util-dynamodb';
 
 const region = process.env.BEDROCK_REGION ?? 'ap-northeast-2';
 const modelId =
   process.env.BEDROCK_MODEL_ID ??
-  'anthropic.claude-3-haiku-20240307-v1:0';
+  'anthropic.claude-3-5-sonnet-20240620-v1:0';
 
 const client = new BedrockRuntimeClient({ region });
 const ddbClient = new DynamoDBClient({ region });
 const docClient = DynamoDBDocumentClient.from(ddbClient);
-
-interface ExtractGraphEvent {
-  jobId?: string;
-  text?: string;
-}
 
 const PROMPT = `
 You are an information extraction model for literary text.
@@ -307,50 +304,61 @@ async function extractGraph(text: string) {
 
   return {
     ok: true,
-    raw: answerText,
     graph,
   };
 }
 
-export const handler = async (event: any) => {
-  console.log('### incoming event:', JSON.stringify(event).slice(0, 1000));
+export const handler = async (event: DynamoDBStreamEvent) => {
+  console.log('### incoming stream event records:', event.Records.length);
 
-  // 1. 비동기 호출이므로 jobId와 text가 event에 직접 들어옴 (API Route에서 전달)
-  const { jobId, text } = event;
+  for (const record of event.Records) {
+    if (record.eventName !== 'INSERT') continue;
 
-  if (!jobId || !text) {
-    console.error('Missing jobId or text');
-    return;
-  }
+    const newImage = record.dynamodb?.NewImage;
+    if (!newImage) continue;
 
-  try {
-    const graphData = await extractGraph(text);
+    // Unmarshall DynamoDB JSON to standard JSON
+    // @ts-ignore - types mismatch slightly but unmarshall works
+    const item = unmarshall(newImage as any);
+    const { id, text } = item;
 
-    // 2. 성공 시 DB 업데이트
-    await docClient.send(new UpdateCommand({
-      TableName: process.env.AMPLIFY_DATA_EXTRACTIONJOB_TABLE_NAME,
-      Key: { id: jobId },
-      UpdateExpression: 'set #status = :status, #result = :result',
-      ExpressionAttributeNames: { '#status': 'status', '#result': 'result' },
-      ExpressionAttributeValues: {
-        ':status': 'COMPLETED',
-        ':result': graphData,
-      },
-    }));
+    console.log(`Processing job: ${id}`);
 
-  } catch (error) {
-    console.error('Error extracting graph:', error);
+    if (!id || !text) {
+      console.error('Missing id or text for job');
+      continue;
+    }
 
-    // 3. 실패 시 DB 업데이트
-    await docClient.send(new UpdateCommand({
-      TableName: process.env.AMPLIFY_DATA_EXTRACTIONJOB_TABLE_NAME,
-      Key: { id: jobId },
-      UpdateExpression: 'set #status = :status, #errorMessage = :error',
-      ExpressionAttributeNames: { '#status': 'status', '#errorMessage': 'errorMessage' },
-      ExpressionAttributeValues: {
-        ':status': 'FAILED',
-        ':error': String(error),
-      },
-    }));
+    try {
+      const graphData = await extractGraph(text);
+
+      // Update DB with success
+      await docClient.send(new UpdateCommand({
+        TableName: process.env.AMPLIFY_DATA_EXTRACTIONJOB_TABLE_NAME,
+        Key: { id },
+        UpdateExpression: 'set #status = :status, #result = :result',
+        ExpressionAttributeNames: { '#status': 'status', '#result': 'result' },
+        ExpressionAttributeValues: {
+          ':status': 'COMPLETED',
+          ':result': JSON.stringify(graphData), // Store as string if using AWSJSON or to be safe
+        },
+      }));
+      console.log(`Job ${id} completed`);
+
+    } catch (error) {
+      console.error(`Error processing job ${id}:`, error);
+
+      // Update DB with failure
+      await docClient.send(new UpdateCommand({
+        TableName: process.env.AMPLIFY_DATA_EXTRACTIONJOB_TABLE_NAME,
+        Key: { id },
+        UpdateExpression: 'set #status = :status, #errorMessage = :error',
+        ExpressionAttributeNames: { '#status': 'status', '#errorMessage': 'errorMessage' },
+        ExpressionAttributeValues: {
+          ':status': 'FAILED',
+          ':error': String(error),
+        },
+      }));
+    }
   }
 };

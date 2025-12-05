@@ -5,6 +5,11 @@ import { GraphView } from '../components/GraphView';
 
 import outputs from '@/../amplify_outputs.json';
 
+import { generateClient } from 'aws-amplify/data';
+import { type Schema } from '@/../amplify/data/resource';
+
+const client = generateClient<Schema>();
+
 export default function Home() {
   const [text, setText] = useState('');
   const [result, setResult] = useState<any>(null);
@@ -17,58 +22,56 @@ export default function Home() {
     setResult(null);
 
     try {
-      // 1. Start Job
-      const startRes = await fetch('/api/extract/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+      // 1. Create Job directly in DynamoDB via AppSync
+      const { data: job, errors } = await client.models.ExtractionJob.create({
+        status: 'PROCESSING',
+        text: text.slice(0, 30000), // Store up to ~30k chars (safe for DynamoDB 400KB limit)
+        errorMessage: '',
+      }, {
+        authMode: 'userPool', // Explicitly use User Pool for authenticated users
       });
 
-      const startData = await startRes.json();
-      if (!startData.ok || !startData.jobId) {
-        throw new Error(startData.message || 'Failed to start job');
+      if (errors || !job) {
+        throw new Error('Failed to create job: ' + JSON.stringify(errors));
       }
 
-      const jobId = startData.jobId;
+      const jobId = job.id;
       console.log('Job started:', jobId);
 
-      // 2. Poll for Status
+      // 2. Poll for Status via AppSync
       const pollInterval = setInterval(async () => {
         try {
-          const statusRes = await fetch(`/api/extract/status?id=${jobId}`);
-          const statusData = await statusRes.json();
+          const { data: jobData } = await client.models.ExtractionJob.get({ id: jobId }, { authMode: 'userPool' });
 
-          if (!statusData.ok) {
-            clearInterval(pollInterval);
-            setLoading(false);
-            setResult({ ok: false, error: statusData.message });
+          if (!jobData) {
+            console.warn('Job not found');
             return;
           }
 
-          console.log('Job status:', statusData.status);
+          console.log('Job status:', jobData.status);
 
-          if (statusData.status === 'COMPLETED') {
+          if (jobData.status === 'COMPLETED') {
             clearInterval(pollInterval);
             setLoading(false);
 
-            let finalResult = statusData.result;
-            if (typeof finalResult === 'string') {
-              try {
+            let finalResult = jobData.result;
+            // Parse until it's an object (handles double-encoding)
+            try {
+              while (typeof finalResult === 'string') {
                 finalResult = JSON.parse(finalResult);
-              } catch (e) {
-                console.error('Failed to parse result JSON', e);
               }
+            } catch (e) {
+              console.error('Failed to parse result JSON', e);
             }
             setResult(finalResult);
-          } else if (statusData.status === 'FAILED') {
+          } else if (jobData.status === 'FAILED') {
             clearInterval(pollInterval);
             setLoading(false);
-            setResult({ ok: false, error: statusData.errorMessage });
+            setResult({ ok: false, error: jobData.errorMessage });
           }
           // If PROCESSING, continue polling
         } catch (e) {
           console.error('Polling error:', e);
-          // Don't stop polling on transient network errors, but maybe limit retries in real app
         }
       }, 3000); // Poll every 3 seconds
 

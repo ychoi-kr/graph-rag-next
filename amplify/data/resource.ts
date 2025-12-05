@@ -11,7 +11,7 @@ const schema = a.schema({
     .model({
       content: a.string(),
     })
-    .authorization((allow) => [allow.guest()]),
+    .authorization((allow) => [allow.guest(), allow.authenticated()]),
 
   ExtractionJob: a
     .model({
@@ -20,7 +20,7 @@ const schema = a.schema({
       result: a.json(),
       errorMessage: a.string(),
     })
-    .authorization((allow) => [allow.guest()]),
+    .authorization((allow) => [allow.guest(), allow.authenticated()]),
 });
 
 export type Schema = ClientSchema<typeof schema>;
